@@ -910,26 +910,16 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-
         if self._transformed_l1_weights is None:
-            w13_scale = deep_gemm.transform_sf_into_required_layout(
-                self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
-                2 * self.intermediate_size,
-                self.hidden_size,
-                (1, 32),
-                self.num_local_experts,
-            )
-            w2_scale = deep_gemm.transform_sf_into_required_layout(
-                self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
-                self.hidden_size,
-                self.intermediate_size,
-                (1, 32),
-                self.num_local_experts,
-            )
             self._transformed_l1_weights, self._transformed_l2_weights = (
-                deep_gemm.transform_weights_for_mega_moe(
-                    (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                    (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+                backend.transform_weights(
+                    w13_weight=self.w13_weight.data,
+                    w13_weight_scale=self.w13_weight_scale.data,
+                    w2_weight=self.w2_weight.data,
+                    w2_weight_scale=self.w2_weight_scale.data,
+                    num_local_experts=self.num_local_experts,
+                    hidden_size=self.hidden_size,
+                    intermediate_size=self.intermediate_size,
                 )
             )
             # Drop the original loader-side parameters: the MegaMoE kernels only
