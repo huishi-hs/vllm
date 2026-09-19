@@ -230,7 +230,7 @@ class DeepGemmMegaMoEBackend:
     responsible for the routed-expert weight transform run at load time, the
     optional shared-expert weight transform, and the actual MegaMoE kernel
     invocation at inference time. Runtime capability checks live in
-    :func:`_get_deepgemm_mega_moe_backend`: obtaining a backend already implies
+    :func:`_get_mega_moe_backend`: obtaining a backend already implies
      that the current device and shapes are supported.
     """
 
@@ -669,6 +669,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             tuple[torch.Tensor, torch.Tensor] | None
         ) = None
 
+        self._backend: DeepGemmMegaMoEBackend | None = None
+
         # Register in the static forward context so the custom-op wrapper
         # can look up this module by name from within a torch.compile graph.
         compilation_config = vllm_config.compilation_config
@@ -730,37 +732,32 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
     @staticmethod
     def _ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
-        return (sf.to(torch.int32) << 23).view(torch.float32)
+        return _ue8m0_uint8_to_float(sf)
+
+    def _ensure_backend(self) -> DeepGemmMegaMoEBackend:
+        """Lazily resolve the MegaMoE backend.
+
+        The backend is looked up via :func:`_get_mega_moe_backend`, which
+        performs all runtime capability checks. Failure propagates directly
+        to the caller. This must be called before :meth:`finalize_weights`
+        releases the loader-side parameters.
+        """
+        if self._backend is not None:
+            return self._backend
+        assert self.w13_weight is not None, (
+            "_ensure_backend() must be called before finalize_weights() "
+            "releases the loader-side parameters."
+        )
+        self._backend = _get_mega_moe_backend(
+            self.w13_weight.device,
+            self.hidden_size,
+            self.intermediate_size,
+        )
+        return self._backend
 
     def _check_runtime_supported(self) -> None:
-        device = self.w13_weight.device
-        if torch.cuda.get_device_capability(device)[0] != 10:
-            raise NotImplementedError("DeepGEMM MegaMoE requires SM100 GPUs.")
-        if self.hidden_size % 128 != 0 or self.intermediate_size % 128 != 0:
-            raise ValueError(
-                "DeepGEMM MegaMoE requires hidden and intermediate sizes "
-                "to be multiples of 128."
-            )
-
-    @staticmethod
-    def _deep_gemm_supports_shared_experts(deep_gemm) -> bool:
-        """Check the Python API before touching a symmetric-memory group.
-
-        This also gives users of an older precompiled vLLM wheel a safe serial
-        fallback instead of failing halfway through multi-rank buffer setup.
-        """
-        try:
-            buffer_params = signature(deep_gemm.get_symm_buffer_for_mega_moe).parameters
-            kernel_params = signature(deep_gemm.fp8_fp4_mega_moe).parameters
-        except (TypeError, ValueError):
-            return False
-        return (
-            hasattr(deep_gemm, "get_block_m_for_mega_moe")
-            and hasattr(deep_gemm, "transform_weights_for_mega_moe")
-            and "num_shared_experts" in buffer_params
-            and "shared_l1_weights" in kernel_params
-            and "shared_l2_weights" in kernel_params
-        )
+        """Preserved for API compatibility; delegates to the backend check."""
+        self._ensure_backend()
 
     def _finalize_shared_expert_weights(
         self, deep_gemm, shared_experts: DeepseekV4MLP
@@ -909,12 +906,12 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         ).squeeze(0)
 
     def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
+        backend = self._ensure_backend()
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
 
         if self._transformed_l1_weights is None:
-            self._check_runtime_supported()
             w13_scale = deep_gemm.transform_sf_into_required_layout(
                 self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
                 2 * self.intermediate_size,
@@ -951,7 +948,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
         if self._transformed_shared_l1_weights is not None:
             return
-        if not self._deep_gemm_supports_shared_experts(deep_gemm):
+        if not backend.supports_shared_experts(deep_gemm):
             logger.warning_once(
                 "Disabling native MegaMoE shared-expert fusion because the "
                 "installed DeepGEMM Python API is older than the vLLM "
