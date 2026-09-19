@@ -578,7 +578,9 @@ def _get_mega_moe_backend(
     return DeepGemmSm100MegaMoEBackend()
 
 class DeepseekV4MegaMoEExperts(nn.Module):
-    _symm_buffer_cache: dict[tuple[int, int, int, int, int, int, int, int], object] = {}
+    _symm_buffer_cache: dict[
+        tuple[int, int, int, int, int, int, int, int, str], object
+    ] = {}
 
     def __init__(
         self,
@@ -835,6 +837,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
 
+        backend = self._ensure_backend()
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -846,6 +849,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             self.hidden_size,
             self.intermediate_size,
             self.num_shared_experts if self.has_fused_shared_experts else 0,
+            backend.mma_type,
         )
         symm_buffer = self._symm_buffer_cache.get(key)
         if symm_buffer is None:
@@ -859,6 +863,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 num_shared_experts=(
                     self.num_shared_experts if self.has_fused_shared_experts else 0
                 ),
+                mma_type=backend.mma_type,
             )
             self._symm_buffer_cache[key] = symm_buffer
         return symm_buffer
