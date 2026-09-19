@@ -938,6 +938,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
 
+        backend = self._ensure_backend()
+
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
@@ -980,7 +982,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 symm_buffer.num_max_tokens_per_rank,
                 num_tokens,
                 self.top_k,
-                "fp8xfp4",
+                backend.mma_type,
             )
 
         prepare_megamoe_inputs(
@@ -994,27 +996,29 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             is_padding=is_padding,
             shared_x_sf=shared_x_sf,
             shared_block_m=shared_block_m,
+            hidden_quant_group_k=backend.hidden_quant.group_k,
+            hidden_quant_scale_ue8m0=backend.hidden_quant.scale_ue8m0,
         )
 
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
         if self.has_fused_shared_experts:
-            deep_gemm.fp8_fp4_mega_moe(
-                y,
-                self._transformed_l1_weights,
-                self._transformed_l2_weights,
-                symm_buffer,
+            backend.run_mega_moe(
+                y=y,
+                l1_weights=self._transformed_l1_weights,
+                l2_weights=self._transformed_l2_weights,
+                symm_buffer=symm_buffer,
                 shared_l1_weights=self._transformed_shared_l1_weights,
                 shared_l2_weights=self._transformed_shared_l2_weights,
                 activation_clamp=activation_clamp,
                 fast_math=fast_math,
             )
         else:
-            deep_gemm.fp8_fp4_mega_moe(
-                y,
-                self._transformed_l1_weights,
-                self._transformed_l2_weights,
-                symm_buffer,
+            backend.run_mega_moe(
+                y=y,
+                l1_weights=self._transformed_l1_weights,
+                l2_weights=self._transformed_l2_weights,
+                symm_buffer=symm_buffer,
                 activation_clamp=activation_clamp,
                 fast_math=fast_math,
             )
